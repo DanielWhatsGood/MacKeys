@@ -30,8 +30,12 @@ g_MacMode := true                        ; master on/off
 g_AltTabOpen := false
 gReady := false                          ; set once the window is built
 
-; Ctrl+Left / Ctrl+Right switch virtual desktops (macOS Spaces behaviour).
-CFG_CtrlArrowsSwitchDesktops := true
+; What Ctrl+Left / Ctrl+Right do, the way macOS steps through Spaces:
+;   "windows"  - step to the window on the left / right
+;   "desktops" - switch virtual desktop
+;   "off"      - plain Ctrl+arrow
+CFG_CtrlArrows := "windows"
+g_WinOrder := []                         ; left-to-right order for "windows"
 
 ; Ctrl+Up opens Task View (the macOS Mission Control gesture).
 CFG_CtrlUpIsMissionControl := true
@@ -118,6 +122,80 @@ SendAsCmd(keys, blind := false) {
 Snip() => SendAsCmd("{LWin down}{LShift down}s{LShift up}{LWin up}")
 
 SwitchDesktop(dir) => SendAsCmd("{LWin down}{LCtrl down}{" dir "}{LCtrl up}{LWin up}")
+
+; Step to the neighbouring window, like Ctrl+arrow between full-screen apps on
+; a Mac. The order is remembered rather than recomputed, so Right then Left
+; always lands back where you started: windows keep their slot, new ones join
+; on the right, closed ones drop out. It wraps at either end.
+SwitchWindow(dir) {
+    global g_WinOrder
+    onDesktop := SwitchableWindows()
+
+    known := Map()
+    order := []
+    for hwnd in g_WinOrder
+        if WinExist("ahk_id " hwnd) && !known.Has(hwnd)
+            order.Push(hwnd), known[hwnd] := true
+    for hwnd in onDesktop
+        if !known.Has(hwnd)
+            order.Push(hwnd), known[hwnd] := true
+    g_WinOrder := order
+
+    ; Windows on other virtual desktops keep their slot but are skipped.
+    visible := Map()
+    for hwnd in onDesktop
+        visible[hwnd] := true
+    list := []
+    for hwnd in order
+        if visible.Has(hwnd)
+            list.Push(hwnd)
+    if !list.Length
+        return
+
+    n := list.Length
+    active := WinExist("A")
+    i := (dir = "Right") ? 0 : n + 1
+    for idx, hwnd in list
+        if (hwnd = active)
+            i := idx
+    next := Mod(i - 1 + (dir = "Right" ? 1 : -1) + n, n) + 1
+    try WinActivate("ahk_id " list[next])
+}
+
+; The windows Alt+Tab would offer on the current desktop, minus minimized
+; ones, sorted left to right by position to seed the order on first use.
+SwitchableWindows() {
+    lines := ""
+    for hwnd in WinGetList() {
+        try {
+            if WinGetMinMax(hwnd) = -1 || WinGetTitle(hwnd) = ""
+                continue
+            ex := WinGetExStyle(hwnd)
+            if (ex & 0x80) || (ex & 0x08000000)            ; tool / no-activate
+                continue
+            if DllCall("GetWindow", "ptr", hwnd, "uint", 4, "ptr") && !(ex & 0x40000)
+                continue                                    ; owned popup
+            cls := WinGetClass(hwnd)
+            if (cls = "Progman" || cls = "WorkerW"
+             || cls = "Shell_TrayWnd" || cls = "Shell_SecondaryTrayWnd")
+                continue
+            cloaked := Buffer(4, 0)                         ; other desktop, UWP ghost
+            DllCall("dwmapi\DwmGetWindowAttribute", "ptr", hwnd, "int", 14, "ptr", cloaked, "int", 4)
+            if NumGet(cloaked, "UInt")
+                continue
+            WinGetPos(&x, &y, , , hwnd)
+        } catch {
+            continue
+        }
+        lines .= Format("{:07}{:07}{:020}`n", x + 1000000, y + 1000000, hwnd)
+    }
+    result := []
+    if (lines = "")
+        return result
+    for line in StrSplit(Sort(RTrim(lines, "`n")), "`n")
+        result.Push(Integer(SubStr(line, 15)))
+    return result
+}
 
 ; Win+Left/Right snaps the window to that half of the current screen; adding
 ; Shift throws it to the next display instead. Shift is lifted first because
@@ -303,7 +381,7 @@ WatchAltTab() {
 ;    Cmd+Option+Left / Right   -> start / end of line
 ;    Option+Left / Right       -> jump a word
 ;    Cmd+Up / Down             -> top / bottom of document
-;    Ctrl+Left / Right         -> switch virtual desktop
+;    Ctrl+Left / Right         -> step to the next window (or virtual desktop)
 ;    Ctrl+Up                   -> Task View
 ;  Adding Shift to any of the text ones selects instead of moving.
 ;==============================================================================
@@ -312,7 +390,7 @@ WatchAltTab() {
 *Right:: SideArrow("Right", "End")
 
 SideArrow(dir, edge) {
-    global CFG_CtrlArrowsSwitchDesktops
+    global CFG_CtrlArrows
     shifted := ShiftHeld()
 
     if CmdHeld() {
@@ -331,9 +409,15 @@ SideArrow(dir, edge) {
         return
     }
 
-    if RealCtrl() && CFG_CtrlArrowsSwitchDesktops && !shifted {
-        SwitchDesktop(dir)
-        return
+    if RealCtrl() && !shifted {
+        if (CFG_CtrlArrows = "windows") {
+            SwitchWindow(dir)
+            return
+        }
+        if (CFG_CtrlArrows = "desktops") {
+            SwitchDesktop(dir)
+            return
+        }
     }
 
     PassThru("{" dir "}")
@@ -620,7 +704,11 @@ ToggleStartup(*) {
 LoadSettings() {
     global
     g_MacMode                       := IniRead(g_Ini, "State",   "MacMode",        "1") = "1"
-    CFG_CtrlArrowsSwitchDesktops    := IniRead(g_Ini, "Options", "CtrlArrowsDesk", "1") = "1"
+    ; CtrlArrowsDesk was the old on/off switch; unticked carries over as "off".
+    CFG_CtrlArrows := IniRead(g_Ini, "Options", "CtrlArrows",
+        IniRead(g_Ini, "Options", "CtrlArrowsDesk", "1") = "0" ? "off" : "windows")
+    if !(CFG_CtrlArrows ~= "^(windows|desktops|off)$")
+        CFG_CtrlArrows := "windows"
     CFG_CtrlUpIsMissionControl      := IniRead(g_Ini, "Options", "CtrlUpTaskView", "1") = "1"
     CFG_CmdShiftSIsScreenshot       := IniRead(g_Ini, "Options", "CmdShiftSSnip",  "1") = "1"
     CFG_RightCmdIsWinKey            := IniRead(g_Ini, "Options", "RightCmdIsWin",  "0") = "1"
@@ -631,7 +719,8 @@ SaveSettings() {
     global
     try {
         IniWrite(g_MacMode                    ? 1 : 0, g_Ini, "State",   "MacMode")
-        IniWrite(CFG_CtrlArrowsSwitchDesktops ? 1 : 0, g_Ini, "Options", "CtrlArrowsDesk")
+        IniWrite(CFG_CtrlArrows,                       g_Ini, "Options", "CtrlArrows")
+        try IniDelete(g_Ini, "Options", "CtrlArrowsDesk")
         IniWrite(CFG_CtrlUpIsMissionControl   ? 1 : 0, g_Ini, "Options", "CtrlUpTaskView")
         IniWrite(CFG_CmdShiftSIsScreenshot    ? 1 : 0, g_Ini, "Options", "CmdShiftSSnip")
         IniWrite(CFG_RightCmdIsWinKey         ? 1 : 0, g_Ini, "Options", "RightCmdIsWin")
@@ -681,9 +770,11 @@ BuildGui() {
     gG.Add("Text", "w470 y+12", "Options")
     gG.SetFont("s10 w400 c" gFg)
 
-    gChkDesk := gG.Add("CheckBox", "w470 y+10",
-        "Ctrl+Left / Ctrl+Right switch virtual desktops (macOS Spaces)")
-    gChkTask := gG.Add("CheckBox", "w470 y+6",
+    gG.Add("Text", "w200 y+12", "Ctrl+Left / Ctrl+Right")
+    gDdlArrows := gG.Add("DropDownList", "x+10 yp-4 w260",
+        ["Switch windows", "Switch virtual desktops", "Do nothing special"])
+    gDdlArrows.OnEvent("Change", OptionChanged)
+    gChkTask := gG.Add("CheckBox", "xm w470 y+10",
         "Ctrl+Up opens Task View (Mission Control)")
     gChkSnip := gG.Add("CheckBox", "w470 y+6",
         "Cmd+Shift+S takes a screenshot (shadows Save As)")
@@ -692,7 +783,7 @@ BuildGui() {
     gChkRun  := gG.Add("CheckBox", "w470 y+6",
         "Start MacKeys when I log in")
 
-    for c in [gChkDesk, gChkTask, gChkSnip, gChkRWin]
+    for c in [gChkTask, gChkSnip, gChkRWin]
         c.OnEvent("Click", OptionChanged)
     gChkRun.OnEvent("Click", (*) => ToggleStartup())
 
@@ -718,7 +809,7 @@ BuildGui() {
 
 OptionChanged(*) {
     global
-    CFG_CtrlArrowsSwitchDesktops := gChkDesk.Value ? true : false
+    CFG_CtrlArrows               := ArrowModes()[gDdlArrows.Value]
     CFG_CtrlUpIsMissionControl   := gChkTask.Value ? true : false
     CFG_CmdShiftSIsScreenshot    := gChkSnip.Value ? true : false
     CFG_RightCmdIsWinKey         := gChkRWin.Value ? true : false
@@ -733,7 +824,9 @@ RefreshGui() {
         gState.Text := g_MacMode ? "macOS shortcuts are ON - Command acts as Ctrl." : "macOS shortcuts are OFF - stock Windows behaviour."
         gState.Opt("c" (g_MacMode ? gOk : gBad))
         gBtn.Text := g_MacMode ? "Switch to Windows shortcuts" : "Switch to macOS shortcuts"
-        gChkDesk.Value := CFG_CtrlArrowsSwitchDesktops
+        for idx, mode in ArrowModes()
+            if (mode = CFG_CtrlArrows)
+                gDdlArrows.Value := idx
         gChkTask.Value := CFG_CtrlUpIsMissionControl
         gChkSnip.Value := CFG_CmdShiftSIsScreenshot
         gChkRWin.Value := CFG_RightCmdIsWinKey
@@ -750,6 +843,9 @@ ShowGui(*) {
     RefreshGui()
     gG.Show()
 }
+
+; Same order as the entries in the Ctrl+arrow drop-down.
+ArrowModes() => ["windows", "desktops", "off"]
 
 ShortcutMap() {
     m := []
@@ -781,7 +877,7 @@ ShortcutMap() {
     m.Push(["Cmd + Shift + Z", "Redo"])
     m.Push(["Cmd + Option + I", "Developer tools"])
     m.Push(["Cmd + Option + Esc", "Task Manager"])
-    m.Push(["Ctrl + Left / Right", "Switch virtual desktop"])
+    m.Push(["Ctrl + Left / Right", "Previous / next window"])
     m.Push(["Ctrl + Up", "Task View"])
     m.Push(["Ctrl + Esc", "Start menu"])
     m.Push(["Shift + any of the above", "Selects instead of moves"])

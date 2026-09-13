@@ -105,7 +105,7 @@ reaches the browser address bar instead of locking your screen.
 | `Cmd+Shift+Z` | Redo | Ctrl+Y |
 | `Cmd+Option+I` | Developer tools | Ctrl+Shift+I |
 | `Cmd+Option+Esc` | Force Quit → Task Manager | Ctrl+Shift+Esc |
-| `Ctrl+Left` / `Ctrl+Right` | Switch Spaces → virtual desktops | Win+Ctrl+Left / Right |
+| `Ctrl+Left` / `Ctrl+Right` | Step to the previous / next window, like moving between full-screen Spaces | — (or Win+Ctrl+Left / Right for virtual desktops) |
 | `Ctrl+Up` | Mission Control → Task View | Win+Tab |
 
 Adding Shift to `Cmd+Option+arrow` or `Option+arrow` selects instead of moving.
@@ -124,14 +124,17 @@ CONFIG block and the right-hand Command key becomes one.
 
 ## Known trade-offs
 
-These are real conflicts, not oversights. The first three have tick-boxes in the
+These are real conflicts, not oversights. The first two can be changed in the
 MacKeys window.
 
 1. **`Cmd+Shift+S` shadows "Save As."** You asked for it as screenshot, so
    screenshot wins. Untick it to get Save As back; `Cmd+Shift+4` still snips.
-2. **`Ctrl+Left/Right` no longer does word navigation.** It switches virtual
-   desktops, matching macOS. Word navigation moved to `Option+arrow`, also
-   matching macOS. Untick it to revert.
+2. **`Ctrl+Left/Right` no longer does word navigation.** It steps through your
+   open windows the way macOS steps through Spaces: windows keep a fixed
+   left-to-right order, new ones join on the right, minimized ones are skipped,
+   and it wraps at either end. The drop-down in the MacKeys window can switch
+   it to virtual desktops instead, or turn it off. Word navigation moved to
+   `Option+arrow`, matching macOS.
 3. **`Cmd+H` is still Ctrl+H**, not "hide window." Ctrl+H is find-and-replace in
    too many apps to take over.
 4. **Elevated windows ignore the script.** Anything running as administrator —
