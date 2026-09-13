@@ -85,6 +85,7 @@ reaches the browser address bar instead of locking your screen.
 | `` Cmd+` `` | Cycle windows of the current app | Alt+Esc |
 | `Cmd+Space` | Search | Win+S |
 | `Cmd+Ctrl+Space` | Emoji picker | Win+. |
+| `Ctrl+Space` | Switch to the next keyboard layout / input source | Win+Space |
 | `Cmd+Q` | Quit app | Alt+F4 |
 | `Cmd+Ctrl+Q` | Lock screen | Win+L |
 | `Cmd+M` | Minimize window | — |

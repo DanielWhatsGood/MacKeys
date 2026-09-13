@@ -121,6 +121,17 @@ SendAsCmd(keys, blind := false) {
 
 Snip() => SendAsCmd("{LWin down}{LShift down}s{LShift up}{LWin up}")
 
+; Win+Space steps to the next keyboard layout. Ctrl has to be lifted first, or
+; Windows reads Win+Ctrl+Space and flips back to the previous layout instead.
+; A pinky Ctrl that is still held goes back down so the next Space repeats.
+SwitchLayout() {
+    SendInput "{Blind}{LCtrl up}{RCtrl up}{LWin down}{Space}{LWin up}"
+    if GetKeyState("LCtrl", "P")
+        SendInput "{Blind}{LCtrl down}"
+    if GetKeyState("RCtrl", "P")
+        SendInput "{Blind}{RCtrl down}"
+}
+
 SwitchDesktop(dir) => SendAsCmd("{LWin down}{LCtrl down}{" dir "}{LCtrl up}{LWin up}")
 
 ; Step to the neighbouring window, like Ctrl+arrow between full-screen apps on
@@ -266,12 +277,16 @@ WatchAltTab() {
 ;==============================================================================
 ;  Cmd+Space - Spotlight -> Windows Search
 ;  Cmd+Ctrl+Space - emoji and symbol picker
+;  Ctrl+Space - next keyboard layout (Win+Space), the macOS input-source key
 ;==============================================================================
 
 ^Space::
 {
     if !CmdHeld() {
-        PassThru("{Space}")
+        if RealCtrl()
+            SwitchLayout()
+        else
+            PassThru("{Space}")
         return
     }
     if RealCtrl()
@@ -857,6 +872,7 @@ ShortcutMap() {
     m.Push(["Cmd + backtick", "Alt+Esc"])
     m.Push(["Cmd + Space", "Win+S search"])
     m.Push(["Cmd + Ctrl + Space", "Win+. emoji picker"])
+    m.Push(["Ctrl + Space", "Win+Space next keyboard layout"])
     m.Push(["Cmd + Q", "Alt+F4 quit"])
     m.Push(["Cmd + Ctrl + Q", "Win+L lock screen"])
     m.Push(["Cmd + M", "Minimize window"])
