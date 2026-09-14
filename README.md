@@ -82,7 +82,8 @@ reaches the browser address bar instead of locking your screen.
 |---|---|---|
 | `Cmd+Tab` | App switcher, stays open while Command is held | Alt+Tab |
 | `Cmd+Shift+Tab` | Backwards through it | Alt+Shift+Tab |
-| `` Cmd+` `` | Cycle windows of the current app | Alt+Esc |
+| `` Cmd+` `` | Next window of the same app | — |
+| `Cmd+~` (`` Cmd+Shift+` ``) | Previous window of the same app | — |
 | `Cmd+Space` | Search | Win+S |
 | `Cmd+Ctrl+Space` | Emoji picker | Win+. |
 | `Ctrl+Space` | Switch to the next keyboard layout / input source | Win+Space |
@@ -151,6 +152,15 @@ MacKeys window.
 8. **`Cmd+Shift+C` needs Windows clipboard history switched on.** It is off by
    default. The first time you press the chord MacKeys offers to turn it on;
    Settings > System > Clipboard does the same thing.
+
+## Staying reliable
+
+All the remaps live in one keyboard hook, which Windows can quietly remove
+(often after sleep) or blind (while an admin window, the lock screen or a UAC
+prompt has focus). MacKeys checks the hook four times a second and puts in a
+fresh one on unlock, on resume, on leaving an admin window, and the moment a
+Command press reaches Windows as a real Windows key. If something still feels
+stuck, **Reload** from the tray menu.
 
 ## Making it work in admin windows
 

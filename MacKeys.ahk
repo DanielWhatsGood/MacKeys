@@ -15,11 +15,20 @@
 ;==============================================================================
 
 InstallKeybdHook
-SendMode "Input"
+; Event mode, not Input. To send in Input mode AutoHotkey has to unhook the
+; keyboard for the length of the send, and the Command remap sends on every
+; press and release of Command. Keys that landed in that gap skipped the script
+; entirely - lost, or typed plain - and releases in it went unseen, leaving the
+; script convinced Command was still held.
+SendMode "Event"
 SetKeyDelay -1, -1
 SetWinDelay 0
 SetTitleMatchMode 2
 #UseHook true
+; A hotkey pressed again while its last run is still busy waits its turn
+; instead of being thrown away.
+#MaxThreadsBuffer true
+A_MaxHotkeysPerInterval := 1000
 
 ;==============================================================================
 ;  Settings - live values, loaded from MacKeys.ini, editable in the window
@@ -74,6 +83,12 @@ LoadSettings()
 BuildGui()
 ApplyMode(false)
 SaveSettings()
+
+; Keep the keyboard hook alive - see "Keyboard hook health" below.
+DllCall("wtsapi32\WTSRegisterSessionNotification", "ptr", A_ScriptHwnd, "uint", 0)
+OnMessage(0x02B1, OnSessionChange)       ; WM_WTSSESSION_CHANGE
+OnMessage(0x0218, OnPowerChange)         ; WM_POWERBROADCAST
+SetTimer WatchKeyboardHook, 250
 if firstRun {
     if !StartupEnabled()
         ToggleStartup()
@@ -107,16 +122,16 @@ ShiftHeld() => GetKeyState("LShift", "P") || GetKeyState("RShift", "P")
 
 ; Re-send a key with whatever modifiers are genuinely held, i.e. behave as
 ; though this script had never intercepted it.
-PassThru(key) => SendInput("{Blind}" key)
+PassThru(key) => Send("{Blind}" key)
 
 ; Send something with the Command-remap's Ctrl lifted out of the way, then put
 ; Ctrl back if Command is still held - otherwise a second press of the same
 ; Command chord would arrive with no modifier at all.
 SendAsCmd(keys, blind := false) {
-    SendInput "{LCtrl up}{RCtrl up}"
-    SendInput (blind ? "{Blind}" : "") keys
+    Send "{LCtrl up}{RCtrl up}"
+    Send (blind ? "{Blind}" : "") keys
     if CmdHeld()
-        SendInput "{LCtrl down}"
+        Send "{LCtrl down}"
 }
 
 Snip() => SendAsCmd("{LWin down}{LShift down}s{LShift up}{LWin up}")
@@ -125,11 +140,11 @@ Snip() => SendAsCmd("{LWin down}{LShift down}s{LShift up}{LWin up}")
 ; Windows reads Win+Ctrl+Space and flips back to the previous layout instead.
 ; A pinky Ctrl that is still held goes back down so the next Space repeats.
 SwitchLayout() {
-    SendInput "{Blind}{LCtrl up}{RCtrl up}{LWin down}{Space}{LWin up}"
+    Send "{Blind}{LCtrl up}{RCtrl up}{LWin down}{Space}{LWin up}"
     if GetKeyState("LCtrl", "P")
-        SendInput "{Blind}{LCtrl down}"
+        Send "{Blind}{LCtrl down}"
     if GetKeyState("RCtrl", "P")
-        SendInput "{Blind}{RCtrl down}"
+        Send "{Blind}{RCtrl down}"
 }
 
 SwitchDesktop(dir) => SendAsCmd("{LWin down}{LCtrl down}{" dir "}{LCtrl up}{LWin up}")
@@ -178,26 +193,11 @@ SwitchWindow(dir) {
 SwitchableWindows() {
     lines := ""
     for hwnd in WinGetList() {
-        try {
-            if WinGetMinMax(hwnd) = -1 || WinGetTitle(hwnd) = ""
-                continue
-            ex := WinGetExStyle(hwnd)
-            if (ex & 0x80) || (ex & 0x08000000)            ; tool / no-activate
-                continue
-            if DllCall("GetWindow", "ptr", hwnd, "uint", 4, "ptr") && !(ex & 0x40000)
-                continue                                    ; owned popup
-            cls := WinGetClass(hwnd)
-            if (cls = "Progman" || cls = "WorkerW"
-             || cls = "Shell_TrayWnd" || cls = "Shell_SecondaryTrayWnd")
-                continue
-            cloaked := Buffer(4, 0)                         ; other desktop, UWP ghost
-            DllCall("dwmapi\DwmGetWindowAttribute", "ptr", hwnd, "int", 14, "ptr", cloaked, "int", 4)
-            if NumGet(cloaked, "UInt")
-                continue
-            WinGetPos(&x, &y, , , hwnd)
-        } catch {
+        if !IsSwitchable(hwnd)
             continue
-        }
+        try WinGetPos(&x, &y, , , hwnd)
+        catch
+            continue
         lines .= Format("{:07}{:07}{:020}`n", x + 1000000, y + 1000000, hwnd)
     }
     result := []
@@ -206,6 +206,157 @@ SwitchableWindows() {
     for line in StrSplit(Sort(RTrim(lines, "`n")), "`n")
         result.Push(Integer(SubStr(line, 15)))
     return result
+}
+
+; Would Alt+Tab list this window? Visible on this desktop and not minimized.
+IsSwitchable(hwnd) {
+    try {
+        if WinGetMinMax(hwnd) = -1 || WinGetTitle(hwnd) = ""
+            return false
+        ex := WinGetExStyle(hwnd)
+        if (ex & 0x80) || (ex & 0x08000000)                ; tool / no-activate
+            return false
+        if DllCall("GetWindow", "ptr", hwnd, "uint", 4, "ptr") && !(ex & 0x40000)
+            return false                                    ; owned popup
+        cls := WinGetClass(hwnd)
+        if (cls = "Progman" || cls = "WorkerW"
+         || cls = "Shell_TrayWnd" || cls = "Shell_SecondaryTrayWnd")
+            return false
+        cloaked := Buffer(4, 0)                             ; other desktop, UWP ghost
+        DllCall("dwmapi\DwmGetWindowAttribute", "ptr", hwnd, "int", 14, "ptr", cloaked, "int", 4)
+        return !NumGet(cloaked, "UInt")
+    }
+    return false
+}
+
+; Cmd+` - bring up the next window of the frontmost app, as macOS does.
+; Activating the bottom-most one rotates through all of them; going backwards
+; sends the current window to the bottom and activates the one beneath it.
+CycleAppWindows(backward) {
+    active := WinExist("A")
+    try exe := WinGetProcessName(active)
+    catch
+        return
+    list := []
+    for hwnd in WinGetList("ahk_exe " exe)                  ; front to back
+        if IsSwitchable(hwnd)
+            list.Push(hwnd)
+    if list.Length < 2
+        return
+    if !backward {
+        try WinActivate(list[list.Length])
+        return
+    }
+    next := (list[1] = active) ? list[2] : list[1]
+    try WinMoveBottom(active)
+    try WinActivate(next)
+}
+
+;==============================================================================
+;  Keyboard hook health
+;
+;  Every remap lives in one low-level keyboard hook, and Windows can pull it
+;  without a word: it drops a hook that is slow to answer once too often (a
+;  busy moment, waking from sleep), and it hides every key from the hook while
+;  an admin window, the lock screen or a UAC prompt has the keyboard.
+;
+;  The first is how Command turns back into a plain Windows key - Cmd+Space
+;  switching layouts again and Ctrl+Space doing nothing. The second leaves the
+;  hook believing keys let go of in the meantime are still held.
+;
+;  A reinstalled hook starts out with every key up, which cures both. It is
+;  done on unlock, on resume, on coming back from an admin window, and as soon
+;  as a Command press gets through to Windows as a real Windows key.
+;==============================================================================
+
+g_WinSentDown := false                   ; a send is holding Win down on purpose
+
+WatchKeyboardHook() {
+    static strikes := 0, wasBlind := false, lastHwnd := 0, lastOutranks := false
+    static fgSeen := A_TickCount
+    global g_MacMode, g_WinSentDown, CFG_RightCmdIsWinKey
+
+    fg := DllCall("GetForegroundWindow", "ptr")
+    if fg {
+        fgSeen := A_TickCount
+        if (fg != lastHwnd)
+            lastHwnd := fg, lastOutranks := OutranksScript(fg)
+        blind := lastOutranks
+    } else {
+        blind := A_TickCount - fgSeen > 1000                ; lock screen, UAC prompt
+    }
+
+    if blind {
+        wasBlind := true, strikes := 0
+        return
+    }
+    if wasBlind {
+        wasBlind := false
+        RecoverKeyboardHook()
+        return
+    }
+
+    if !g_MacMode || g_WinSentDown
+        || !(CmdLeaked("LWin") || (!CFG_RightCmdIsWinKey && CmdLeaked("RWin"))) {
+        strikes := 0
+        return
+    }
+    if ++strikes >= 2 {                                      ; held for a quarter second
+        strikes := 0
+        RecoverKeyboardHook(true)
+    }
+}
+
+; Windows has the key down, yet the hook never saw it pressed: with a working
+; hook, Command can only ever reach Windows as Ctrl.
+CmdLeaked(key) => IsDownForWindows(key) && !GetKeyState(key, "P")
+
+IsDownForWindows(key) => DllCall("GetAsyncKeyState", "int", GetKeyVK(key), "short") & 0x8000
+
+; Put in a fresh hook. With releaseStuck, also lift any modifier Windows still
+; thinks is down, since the new hook will not know to release it.
+RecoverKeyboardHook(releaseStuck := false) {
+    if releaseStuck {
+        up := ""
+        for key in ["LCtrl", "RCtrl", "LAlt", "RAlt", "LShift", "RShift", "LWin", "RWin"]
+            if IsDownForWindows(key)
+                up .= "{" key " up}"
+        if (up != "")
+            Send "{Blind}{vkE8}" up          ; vkE8 stops a lone Win release opening Start
+    }
+    InstallKeybdHook(true, true)
+}
+
+OnSessionChange(wParam, *) {
+    if (wParam = 0x1 || wParam = 0x3 || wParam = 0x8)       ; console / remote connect, unlock
+        SetTimer(() => RecoverKeyboardHook(true), -500)
+}
+
+OnPowerChange(wParam, *) {
+    if (wParam = 0x7 || wParam = 0x12)                       ; resumed from sleep
+        SetTimer(() => RecoverKeyboardHook(true), -1500)
+}
+
+; Is this window's process elevated when the script is not? The hook is blind
+; to keys typed into such a window. A process that won't say counts as yes.
+OutranksScript(hwnd) {
+    if A_IsAdmin
+        return false
+    try pid := WinGetPID(hwnd)
+    catch
+        return false
+    elevated := true
+    if proc := DllCall("OpenProcess", "uint", 0x1000, "int", false, "uint", pid, "ptr") {
+        if DllCall("advapi32\OpenProcessToken", "ptr", proc, "uint", 0x8, "ptr*", &token := 0) {
+            info := Buffer(4, 0)
+            if DllCall("advapi32\GetTokenInformation", "ptr", token, "int", 20,
+                       "ptr", info, "uint", 4, "uint*", &size := 0)
+                elevated := NumGet(info, "UInt") != 0
+            DllCall("CloseHandle", "ptr", token)
+        }
+        DllCall("CloseHandle", "ptr", proc)
+    }
+    return elevated
 }
 
 ; Win+Left/Right snaps the window to that half of the current screen; adding
@@ -244,8 +395,8 @@ RWin::RCtrl
         return
     }
     if !g_AltTabOpen {
-        SendInput "{LCtrl up}{RCtrl up}"
-        SendInput "{LAlt down}"
+        Send "{LCtrl up}{RCtrl up}"
+        Send "{LAlt down}"
         g_AltTabOpen := true
         SetTimer WatchAltTab, 40
     }
@@ -256,23 +407,19 @@ WatchAltTab() {
     global g_AltTabOpen
     if CmdHeld()
         return
-    SendInput "{LAlt up}"
+    Send "{LAlt up}"
     g_AltTabOpen := false
     SetTimer WatchAltTab, 0
 }
 
 ;==============================================================================
-;  Cmd+` - cycle windows of the current app
+;  Cmd+` - next window of the same app
+;  Cmd+~ (Cmd+Shift+`) - previous window of the same app
 ;==============================================================================
 
-^SC029::
-{
-    if !CmdHeld() {
-        PassThru("{SC029}")
-        return
-    }
-    SendAsCmd("!{Esc}")
-}
+#HotIf CmdHeld()
+*SC029::CycleAppWindows(ShiftHeld())
+#HotIf
 
 ;==============================================================================
 ;  Cmd+Space - Spotlight -> Windows Search
@@ -321,7 +468,7 @@ WatchAltTab() {
         PassThru("m")
         return
     }
-    SendInput "{LCtrl up}{RCtrl up}"
+    Send "{LCtrl up}{RCtrl up}"
     try WinMinimize("A")
 }
 
@@ -410,7 +557,7 @@ SideArrow(dir, edge) {
 
     if CmdHeld() {
         if OptHeld() {                      ; start / end of line
-            SendInput "{Blind}{LAlt up}{RAlt up}"
+            Send "{Blind}{LAlt up}{RAlt up}"
             SendAsCmd(shifted ? "+{" edge "}" : "{" edge "}")
             return
         }
@@ -419,7 +566,7 @@ SideArrow(dir, edge) {
     }
 
     if OptHeld() {                          ; jump a word
-        SendInput "{Blind}{LAlt up}{RAlt up}"
+        Send "{Blind}{LAlt up}{RAlt up}"
         SendAsCmd(shifted ? "^+{" dir "}" : "^{" dir "}")
         return
     }
@@ -465,7 +612,7 @@ SideArrow(dir, edge) {
 ;  Deletion
 ;==============================================================================
 
-!BS::SendInput "^{BS}"
+!BS::Send "^{BS}"
 
 ^BS::
 {
@@ -509,7 +656,7 @@ SideArrow(dir, edge) {
         PassThru("i")
         return
     }
-    SendInput "{LAlt up}{RAlt up}"
+    Send "{LAlt up}{RAlt up}"
     SendAsCmd("^+i")
 }
 
@@ -519,7 +666,7 @@ SideArrow(dir, edge) {
         PassThru("{Esc}")
         return
     }
-    SendInput "{LAlt up}{RAlt up}"
+    Send "{LAlt up}{RAlt up}"
     SendAsCmd("^+{Esc}")
 }
 
@@ -598,7 +745,7 @@ ClipboardHistory() {
 
     ; Drop the Ctrl the Command remap is holding right away, so nothing is
     ; left stuck while we wait for the user's fingers to come off the chord.
-    SendInput "{Blind}{LCtrl up}{RCtrl up}"
+    Send "{Blind}{LCtrl up}{RCtrl up}"
     SetTimer FireClipboardHistory, 20
 }
 
@@ -618,13 +765,15 @@ FireClipboardHistory() {
     ; Every send below is blind. A non-blind one would notice the Win key we
     ; just put down, decide it is a stray modifier, and lift it again before
     ; the V arrives - which is how you end up sending a plain "v".
-    SendInput "{Blind}{LCtrl up}{RCtrl up}{LShift up}{RShift up}{LAlt up}{RAlt up}"
+    Send "{Blind}{LCtrl up}{RCtrl up}{LShift up}{RShift up}{LAlt up}{RAlt up}"
     Sleep 20
-    SendInput "{Blind}{LWin down}"
+    global g_WinSentDown := true
+    Send "{Blind}{LWin down}"
     Sleep 30
-    SendInput "{Blind}{vk56}"          ; V by virtual key, layout-independent
+    Send "{Blind}{vk56}"          ; V by virtual key, layout-independent
     Sleep 30
-    SendInput "{Blind}{LWin up}"
+    Send "{Blind}{LWin up}"
+    g_WinSentDown := false
 
     ClipDbg("sent Win+V after " held "ms - active window now: " ClipActiveDesc())
 }
@@ -869,7 +1018,8 @@ ShortcutMap() {
     m.Push(["Cmd + L", "Ctrl+L, not Win+L lock"])
     m.Push(["Cmd + 1 through 9", "Ctrl + same"])
     m.Push(["Cmd + Tab", "Alt+Tab, held open"])
-    m.Push(["Cmd + backtick", "Alt+Esc"])
+    m.Push(["Cmd + backtick", "Next window of same app"])
+    m.Push(["Cmd + ~ (Shift + backtick)", "Previous window of same app"])
     m.Push(["Cmd + Space", "Win+S search"])
     m.Push(["Cmd + Ctrl + Space", "Win+. emoji picker"])
     m.Push(["Ctrl + Space", "Win+Space next keyboard layout"])
